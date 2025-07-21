@@ -37,9 +37,13 @@ tar -zxvf cmake-3.29.4-linux-x86_64.tar.gz
 # compile dorado
 
 ```
-wget https://cdn.oxfordnanoportal.com/software/analysis/dorado-1.0.2-linux-x64.tar.gz
-tar -xvzf dorado-1.0.2-linux-x64.tar.gz
-cd dorado-1.0.2/build
+git clone https://github.com/nanoporetech/dorado.git
+mkdir dorado/build
+cd dorado/build
+	# release doesn't have htslib under 3rdparty, have to add it manually
+	# wget https://cdn.oxfordnanoportal.com/software/analysis/dorado-1.0.2-linux-x64.tar.gz
+	# tar -xvzf dorado-1.0.2-linux-x64.tar.gz
+	# cd dorado-1.0.2/build
 export LD_LIBRARY_PATH=/ddn/gs1/home/linl7/bin/gcc-950/lib64:$LD_LIBRARY_PATH
 ~/bin/cmake-3.29.4-linux-x86_64/bin/cmake .. -DCMAKE_C_COMPILER=/ddn/gs1/home/linl7/bin/gcc-950/bin/gcc -DCMAKE_CXX_COMPILER=/ddn/gs1/home/linl7/bin/gcc-950/bin/g++ -DCMAKE_INSTALL_RPATH=/ddn/gs1/home/linl7/bin/gcc-950/lib64 -DZLIB_INCLUDE_DIR=/usr/include -DZLIB_LIBRARY=/lib64/libz.so -DCMAKE_BUILD_RPATH=/ddn/gs1/home/linl7/bin/gcc-950/lib64
 make -j$(nproc)
