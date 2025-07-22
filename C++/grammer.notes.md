@@ -35,3 +35,10 @@
 | `std::filesystem::current_path()`                | 获取当前工作目录路径                               |
 | `std::filesystem::remove_all(path)`              | 删除路径及其包含的所有内容（递归删除）                   |
 
+```
+namespace fs = std::filesystem;
+fs::path p = "/tmp/example.txt";
+```
+
+
+# lambda 函数
