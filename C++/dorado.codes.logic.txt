@@ -1,0 +1,247 @@
+
+
+main -> map<subcomand, subcomand_function> -> basecaller -> parser -> setup() ->  pipeline_dec(adding nodes) -> pipline(check topology and setup load entry, Start the nodes) -> dataloader(pipeline, pod5) -> loader.load_reads(pod5_folder_info.files(), ReadOrder::UNRESTRICTED) -> load_reads <- load_reads_by_channel <- load_pod5_reads_from_file_by_read_ids <- m_pipeline.push_message(std::move(read)) to first node
+
+
+
+每个node需要可以接受message和可以发送message, 根据上下游来决定
+
+polyA node
+
+
+
+
+AsyncQueue 一个线程安全的先进先出（FIFO）队列，用于在多线程之间安全地传递数据（例如生产者/消费者模型）。
+	初始化（接收一个整数）：设置capacity
+| 函数名                                              | 类型 | 功能                              |
+| ------------------------------------------------ | -- | ------------------------------- |
+| `void terminate()`                               | 管理 | 设置 `m_terminate=true`，并唤醒所有等待线程 |
+| `bool try_push(Item&& item)`                     | 推入 | 尝试推入一个元素，如果队列满则失败（不会阻塞）         |
+| `void push(Item&& item)`                         | 推入 | 会等待队列非满然后推入（如果设了最大容量）           |
+| `AsyncQueueStatus try_pop_until(Item&, timeout)` | 弹出 | 最多等待到 `timeout` 时间，弹出数据或返回超时或终止 |
+| `Item pop()`                                     | 弹出 | 等待直到能弹出一个元素（不带超时）               |
+| `bool try_pop(Item&)`                            | 弹出 | 尝试弹出一个元素，不等待                    |
+| `bool empty()`                                   | 查询 | 队列是否为空（线程不安全）                   |
+| `bool full()`                                    | 查询 | 队列是否满（线程不安全）                    |
+| `size_t size()`                                  | 查询 | 队列当前大小（线程不安全）                   |
+
+MessageSink 的一个成员 m_work_queue 是 AsyncQueue 实例，同时调用 thread
+	初始化（接收两个整数）：设置AsyncQueue的capacity 和 线程数 m_num_input_threads
+	start_input_processing(接收函数和名字): 调用start_input_queue(), 根据 m_num_input_threads 把接收到的函数放入 私有成员 std::vector<std::thread> m_input_threads; 
+	start_input_queue(): m_work_queue.restart() 来自 AsyncQueue： std::lock_guard lock(m_mutex); m_terminate = false;
+
+类内部可以使用多线程，不断访问和处理自己的成员变量。必须确保线程安全（thread safety），否则可能导致数据竞争（data race）、未定义行为或程序崩溃。
+MessageSink 使用lock保证变量安全，input_thread_fn() 则使的不同node有不同的处理方式
+
+polyAnode 是MessageSink的继承类
+	初始化（接收两个整数）：设置 给定线程数 和 AsyncQueue的capacity 
+	override restart(): 使用 MessageSink 的 start_input_processing() 接收 polyAnode 的 private 的 input_thread_fn()
+	input_thread_fn(): 
+
+PipelineDescriptor 
+	默认初始化
+	实例化之后调用add_node 往 m_node_descriptors 添加 NodeDescriptor（包含当前node和sink_handles)。 
+		add_node 是nodetype的模板函数，接受sink 和 传递给node的参数(包括线程thread），返回sink的handle
+
+Pipeline 
+	初始化（接收PipelineDescriptor，两个vector）：m_nodes，source_to_sink_order，stats_reporters，restart() 每个node
+	把构造函数设成 private 或 protected，从而阻止外部直接用 new 或 Pipeline(...) 创建对象
+	调用静态方法create来初始化
+	create 接收 PipelineDescriptor 和 stats的vector，然后根据PipelineDescriptor生成source_to_sink_order，然后调用Pipeline初始化
+
+DataLoader 的一个成员 m_pipeline 是 Pipeline
+	初始化？
+	load_reads <- load_reads_by_channel <- load_pod5_reads_from_file_by_read_ids <- m_pipeline.push_message(std::move(read)) to source node
+
+
+
+Message
+
+
+using Message = std::variant<SimplexReadPtr,
+                             BamMessage,
+                             ReadPair,
+                             CacheFlushMessage,
+                             DuplexReadPtr,
+                             CorrectionAlignments>;
+
+using SimplexReadPtr = std::unique_ptr<SimplexRead>;
+
+class SimplexRead {
+public:
+    ReadCommon read_common;
+    float digitisation;  // Loaded from source file
+    float range;         // Loaded from source file
+    float offset;        // Loaded from source file
+    uint64_t get_end_time_ms() const;
+    float scaling;  // Scale factor applied to convert raw integers from sequencer into pore current values
+    uint64_t start_sample;
+    uint64_t end_sample;
+    uint64_t run_acquisition_start_time_ms;
+    std::atomic_size_t num_duplex_candidate_pairs{0};
+    // 在多线程环境下，你可以安全地并发访问和修改这个布尔值，而不需要加锁（如 mutex）
+    std::atomic_bool is_duplex_parent{false};
+    std::string prev_read;
+    std::string next_read;
+};
+
+class ReadCommon {
+public:
+    static constexpr int POLY_TAIL_NOT_FOUND = -1;
+    static constexpr int POLY_TAIL_NOT_ENABLED = -2;
+    at::Tensor raw_data;  // Loaded from source file
+    int model_stride{-1};  // The down sampling factor of the model
+    std::string read_id;                  // Unique read ID (UUID4)
+    std::string seq;                      // Read basecall
+    std::string qstring;                  // Read Qstring (Phred)
+    std::vector<uint8_t> moves;           // Move table
+    std::vector<uint8_t> base_mod_probs;  // Modified base probabilities
+    std::string run_id;                   // Run ID - used in read group
+    std::string flow_cell_product_code;   // Flowcell product code
+    std::string sequencing_kit;  // Sequencing kit - Used in primer detection/classification
+    std::string flowcell_id;     // Flowcell ID - used in read group and for sample sheet aliasing
+    std::string position_id;     // Position ID - used for sample sheet aliasing
+    std::string experiment_id;   // Experiment ID - used for sample sheet aliasing
+    std::string model_name;      // Read group
+    dorado::details::Attributes attributes;
+    uint64_t start_time_ms;
+    std::shared_ptr<BarcodeScoreResult> barcoding_result;
+    PrimerClassification primer_classification{};
+    std::size_t pre_trim_seq_length{};
+    std::pair<int, int> adapter_trim_interval{};
+    std::pair<int, int> barcode_trim_interval{};
+    std::vector<AlignmentResult> alignment_results{};
+    uint64_t read_tag{0};
+    std::shared_ptr<ClientInfo> client_info;
+    uint32_t mean_qscore_start_pos = 0;
+    float calculate_mean_qscore() const;
+    std::vector<BamPtr> extract_sam_lines(bool emit_moves, std::optional<uint8_t> modbase_threshold, bool is_duplex_parent) const;
+    std::string barcode{};
+    uint64_t sample_rate = 0;
+    float shift = 0;             // To be set by scaler
+    float scale = 0;             // To be set by scaler
+    std::string scaling_method;  // To be set by scaler
+    std::string parent_read_id;  // Origin read ID for all its subreads. Empty for nonsplit reads.
+    std::shared_ptr<const ModBaseInfo> mod_base_info;  // Modified base settings of the models that ran on this read
+    uint64_t num_trimmed_samples = 0;
+    bool is_duplex{false};
+    size_t get_raw_data_samples() const { return is_duplex ? raw_data.size(1) : raw_data.size(0); }
+    bool is_rna_model{false};
+    models::Chemistry chemistry{models::Chemistry::UNKNOWN};
+    models::RapidChemistry rapid_chemistry{models::RapidChemistry::UNKNOWN};
+    int rna_poly_tail_length{POLY_TAIL_NOT_ENABLED};
+    int poly_tail_signal_anchor{POLY_TAIL_NOT_ENABLED};
+    std::array<std::pair<int, int>, 2> poly_tail_signal_boundaries;
+    int rna_adapter_end_signal_pos{0};
+    size_t subread_id{0};
+    size_t split_count{1};
+    uint32_t split_point{0};
+	float model_q_bias{0.0f};
+    float model_q_scale{0.0f};
+private:
+    void generate_duplex_read_tags(bam1_t*) const;
+    void generate_read_tags(bam1_t* aln, bool emit_moves, bool is_duplex_parent) const;
+    void generate_modbase_tags(bam1_t* aln, std::optional<uint8_t> threshold) const;
+    std::string generate_read_group() const;
+};
+
+
+
+adapter
+
+adapter_info->trim_adapters = trim_adapters;
+adapter_info->trim_primers = trim_primers;
+adapter_info->custom_seqs = parser.visible.present<std::string>("--primer-sequences");
+adapter_info->rna_adapters = parser.hidden.get<bool>("--rna-adapters"); // false by default
+adapter_info->rna_adapters = kit_info.rna_barcodes;
+
+client_info
+	adapter
+	PolyTailCalculatorSelector
+	BarcodingInfo
+
+
+model
+
+model_arg --> model_complex --> model_path --> model_config
+
+
+chemistry
+
+ChemistryKey = std::tuple<Flowcell, KitCode, SamplingRate>;
+
+
+
+output: hts_file
+
+
+
+
+
+setup(args, 
+	model_config, 
+	pod5_folder_info, 
+	mods_model_paths, 
+	device,
+    parser.visible.get<std::string>("--reference"),
+    parser.visible.get<std::string>("--bed-file"), 
+    default_parameters.num_runners,
+	modbase_params, 
+	std::move(hts_file), 
+	parser.visible.get<bool>("--emit-moves"),
+	parser.visible.get<int>("--max-reads"), 
+	parser.visible.get<int>("--min-qscore"),
+	parser.visible.get<std::string>("--read-ids"), 
+	*minimap_options,
+	parser.hidden.get<bool>("--skip-model-compatibility-check"),
+	parser.hidden.get<std::string>("--dump_stats_file"),
+	parser.hidden.get<std::string>("--dump_stats_filter"), 
+	run_batchsize_benchmarks,
+	parser.hidden.get<bool>("--emit-batchsize-benchmarks"),
+	parser.visible.get<std::string>("--resume-from"),
+	parser.visible.get<bool>("--estimate-poly-a"), 
+	polya_config, 
+	model_complex,
+	std::move(barcoding_info), 
+	std::move(adapter_info), 
+	std::move(sample_sheet));
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
